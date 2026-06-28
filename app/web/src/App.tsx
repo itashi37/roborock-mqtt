@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Routes, Route, Navigate, useParams, useNavigate, Link } from 'react-router-dom';
 import { Battery, Sun, Moon, Wifi, WifiOff, Play, Pause, Home, Wind, Droplets, AlertCircle, Clock, MapPin, LogOut, ChevronRight, Wrench } from 'lucide-react';
 import { useSSE } from '@/hooks/useSSE';
@@ -26,7 +26,7 @@ const activeCleaningStates = new Set([
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
-  const { statuses, scheduleStates, isConnected, error, reconnect } = useSSE();
+  const { statuses, scheduleStates, availabilities, isConnected, error, reconnect } = useSSE();
   const { theme, toggleTheme } = useTheme();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [scenesBySlug, setScenesBySlug] = useState<Record<string, SceneInfo[]>>({});
@@ -61,6 +61,13 @@ export function App() {
     }
   }, [scheduleStates]);
 
+  // Overlay the live SSE connection state onto the fetched device list so the
+  // online/offline indicator reflects cloud-connection drops without a refetch.
+  const liveDevices = useMemo(
+    () => devices.map(d => (d.slug in availabilities ? { ...d, online: availabilities[d.slug] } : d)),
+    [devices, availabilities],
+  );
+
   const handleAction = async (action: string, fn: () => Promise<void>) => {
     setActionLoading(action);
     try {
@@ -93,7 +100,7 @@ export function App() {
       <Routes>
         <Route path="/devices/:slug/*" element={
           <DeviceLayout
-            devices={devices}
+            devices={liveDevices}
             statuses={statuses}
             globalNotAtHome={globalNotAtHome}
             setGlobalNotAtHome={setGlobalNotAtHome}
@@ -107,7 +114,7 @@ export function App() {
         }>
           <Route index element={
             <DeviceHome
-              devices={devices}
+              devices={liveDevices}
               statuses={statuses}
               scheduleStates={scheduleStates}
               scenesBySlug={scenesBySlug}
@@ -123,10 +130,10 @@ export function App() {
             <ControlsRoute statuses={statuses} actionLoading={actionLoading} handleAction={handleAction} />
           } />
           <Route path="schedule" element={
-            <ScheduleRoute devices={devices} scenesBySlug={scenesBySlug} scheduleStates={scheduleStates} />
+            <ScheduleRoute devices={liveDevices} scenesBySlug={scenesBySlug} scheduleStates={scheduleStates} />
           } />
           <Route path="maintenance" element={
-            <MaintenanceRoute devices={devices} statuses={statuses} />
+            <MaintenanceRoute devices={liveDevices} statuses={statuses} />
           } />
         </Route>
         <Route path="*" element={

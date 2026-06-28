@@ -61,9 +61,10 @@ type DeviceManager struct {
 	loginData  *LoginData
 	restClient *Client
 	runTracker *RunTracker
-	mu         sync.RWMutex
-	onStatus   func(slug string, status *PublishedStatus)
-	onMap      func(slug string, pngData []byte)
+	mu             sync.RWMutex
+	onStatus       func(slug string, status *PublishedStatus)
+	onMap          func(slug string, pngData []byte)
+	onAvailability func(slug string, online bool)
 }
 
 // NewDeviceManager creates a manager for the given devices.
@@ -104,6 +105,32 @@ func (dm *DeviceManager) SetMapCallback(cb func(slug string, pngData []byte)) {
 	dm.onMap = cb
 }
 
+// SetAvailabilityCallback sets the function called when a device's cloud
+// connection transitions online/offline.
+func (dm *DeviceManager) SetAvailabilityCallback(cb func(slug string, online bool)) {
+	dm.onAvailability = cb
+}
+
+// ConnectedCount returns how many devices currently have a live cloud connection.
+func (dm *DeviceManager) ConnectedCount() int {
+	n := 0
+	for _, md := range dm.devices {
+		if md.CloudMQTT != nil && md.CloudMQTT.IsConnected() {
+			n++
+		}
+	}
+	return n
+}
+
+// ConnectionStates returns each device's slug mapped to its live connection state.
+func (dm *DeviceManager) ConnectionStates() map[string]bool {
+	states := make(map[string]bool, len(dm.devices))
+	for _, md := range dm.devices {
+		states[md.Slug] = md.CloudMQTT != nil && md.CloudMQTT.IsConnected()
+	}
+	return states
+}
+
 // ConnectAll establishes cloud MQTT connections for all devices.
 func (dm *DeviceManager) ConnectAll() {
 	for _, md := range dm.devices {
@@ -129,6 +156,11 @@ func (dm *DeviceManager) ConnectAll() {
 			dev.SetStatus(published)
 			if dm.onStatus != nil {
 				dm.onStatus(dev.Slug, published)
+			}
+		})
+		cloudMQTT.SetAvailabilityCallback(func(online bool) {
+			if dm.onAvailability != nil {
+				dm.onAvailability(dev.Slug, online)
 			}
 		})
 

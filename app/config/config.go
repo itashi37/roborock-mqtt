@@ -89,6 +89,10 @@ type RoborockConfig struct {
 type WebConfig struct {
 	Enabled bool `json:"enabled"`
 	Port    int  `json:"port"`
+	// LivenessGraceSeconds is how long the bridge may stay unhealthy (not
+	// authenticated, or no device connected) before the /livez probe fails.
+	// Defaults to 240 (4 min) when unset.
+	LivenessGraceSeconds int `json:"liveness_grace_seconds,omitempty"`
 }
 
 func LoadConfig(file string) (Config, error) {

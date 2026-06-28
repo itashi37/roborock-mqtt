@@ -34,6 +34,20 @@ type WebServer struct {
 	router         *chi.Mux
 	sseClients     map[string]*SSEClient
 	sseClientsMu   sync.RWMutex
+	// Liveness: timestamp at which the bridge first became unhealthy (not
+	// authenticated, or no device connected). nil while healthy. The probe fails
+	// only once this exceeds the grace window, so transient blips don't restart.
+	unhealthySince *time.Time
+	unhealthyMu    sync.Mutex
+}
+
+// livenessGrace returns the configured grace window before liveness fails,
+// defaulting to 4 minutes when unset.
+func (ws *WebServer) livenessGrace() time.Duration {
+	if s := config.Get().Web.LivenessGraceSeconds; s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return 4 * time.Minute
 }
 
 func NewWebServer(
@@ -87,6 +101,7 @@ func (ws *WebServer) setupRoutes() {
 
 	ws.router.Route("/api", func(r chi.Router) {
 		r.Get("/health", ws.healthCheck)
+		r.Get("/livez", ws.liveness)
 
 		// Auth endpoints
 		r.Get("/auth/status", ws.authStatus)
@@ -429,14 +444,87 @@ func (ws *WebServer) getDeviceFromRequest(w http.ResponseWriter, r *http.Request
 	return dev
 }
 
+// healthCheck is the always-200 human/diagnostic endpoint. It reports auth and
+// per-device connection state in the body but never fails — use /livez for the
+// k8s liveness probe.
 func (ws *WebServer) healthCheck(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":        "ok",
 		"goroutines":    runtime.NumGoroutine(),
 		"authenticated": ws.restClient.IsAuthenticated(),
+		"devices":       ws.connectionStates(),
 		"timestamp":     time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// connectionStates returns each device's slug → live connection state, or an
+// empty map before the bridge has started.
+func (ws *WebServer) connectionStates() map[string]bool {
+	if ws.deviceManager == nil {
+		return map[string]bool{}
+	}
+	return ws.deviceManager.ConnectionStates()
+}
+
+// liveness is the k8s liveness probe. It returns 200 while the bridge is healthy
+// (authenticated AND at least one device connected) or has been unhealthy for
+// less than the grace window; it returns 503 once the bridge has been
+// unrecoverably stuck for longer than the grace window, prompting a pod restart
+// — the proven recovery for an expired cloud session. Transient cloud blips stay
+// within the grace window and do not trigger a restart loop.
+func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
+	authenticated := ws.restClient.IsAuthenticated()
+	connected := ws.deviceManager != nil && ws.deviceManager.ConnectedCount() > 0
+	healthy := authenticated && connected
+
+	now := time.Now()
+	grace := ws.livenessGrace()
+
+	ws.unhealthyMu.Lock()
+	statusCode, newSince, stuckFor := evaluateLiveness(healthy, ws.unhealthySince, now, grace)
+	ws.unhealthySince = newSince
+	ws.unhealthyMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(map[string]any{
+		"healthy":         healthy,
+		"authenticated":   authenticated,
+		"devicesOnline":   ws.deviceManagerConnectedCount(),
+		"stuckForSeconds": int(stuckFor.Seconds()),
+		"graceSeconds":    int(grace.Seconds()),
+		"timestamp":       now.UTC().Format(time.RFC3339),
+	})
+}
+
+// evaluateLiveness is the pure liveness decision. Given the current health, the
+// timestamp the bridge first became unhealthy (nil while healthy), the current
+// time and the grace window, it returns the HTTP status, the updated
+// unhealthy-since timestamp (cleared when healthy), and how long it has been
+// stuck. The probe fails (503) only once the bridge has been continuously
+// unhealthy for longer than the grace window.
+func evaluateLiveness(healthy bool, unhealthySince *time.Time, now time.Time, grace time.Duration) (statusCode int, newSince *time.Time, stuckFor time.Duration) {
+	if healthy {
+		return http.StatusOK, nil, 0
+	}
+	if unhealthySince == nil {
+		t := now
+		unhealthySince = &t
+	}
+	stuckFor = now.Sub(*unhealthySince)
+	statusCode = http.StatusOK
+	if stuckFor > grace {
+		statusCode = http.StatusServiceUnavailable
+	}
+	return statusCode, unhealthySince, stuckFor
+}
+
+func (ws *WebServer) deviceManagerConnectedCount() int {
+	if ws.deviceManager == nil {
+		return 0
+	}
+	return ws.deviceManager.ConnectedCount()
 }
 
 func (ws *WebServer) resetConsumable(w http.ResponseWriter, r *http.Request) {
@@ -673,6 +761,35 @@ func (ws *WebServer) BroadcastDeviceStatus(slug string, status *roborock.Publish
 	ws.sseClientsMu.RUnlock()
 }
 
+// BroadcastDeviceAvailability sends a per-device online/offline transition to all
+// SSE clients so the web UI's connection indicator updates live.
+func (ws *WebServer) BroadcastDeviceAvailability(slug string, online bool) {
+	payload := struct {
+		Type   string `json:"type"`
+		Device string `json:"device"`
+		Online bool   `json:"online"`
+	}{
+		Type:   "availability",
+		Device: slug,
+		Online: online,
+	}
+
+	message, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	messageStr := string(message)
+
+	ws.sseClientsMu.RLock()
+	for _, client := range ws.sseClients {
+		select {
+		case client.Channel <- messageStr:
+		default:
+		}
+	}
+	ws.sseClientsMu.RUnlock()
+}
+
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -689,6 +806,15 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Send initial state for all devices
 	if ws.deviceManager != nil {
 		for _, summary := range ws.deviceManager.GetSummaries() {
+			// Current connection state, so the indicator is correct on first paint.
+			avail := struct {
+				Type   string `json:"type"`
+				Device string `json:"device"`
+				Online bool   `json:"online"`
+			}{Type: "availability", Device: summary.Slug, Online: summary.Online}
+			availMsg, _ := json.Marshal(avail)
+			fmt.Fprintf(w, "data: %s\n\n", string(availMsg))
+
 			if summary.Status != nil {
 				payload := struct {
 					Device string `json:"device"`

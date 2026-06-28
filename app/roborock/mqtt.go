@@ -29,8 +29,11 @@ type CloudMQTT struct {
 	mapSecurity         *MapSecurityData
 	mapChan             chan []byte
 	onStatus            func(*DeviceStatus)
+	onAvailability      func(online bool)
 	mu                  sync.Mutex
 	connected           bool
+	available           bool
+	availKnown          bool
 	consecutiveTimeouts int
 	stopCh              chan struct{}
 }
@@ -48,6 +51,26 @@ func NewCloudMQTT(loginData *LoginData, device *DeviceInfo) *CloudMQTT {
 // SetStatusCallback sets the function called when device status updates arrive.
 func (cm *CloudMQTT) SetStatusCallback(cb func(*DeviceStatus)) {
 	cm.onStatus = cb
+}
+
+// SetAvailabilityCallback sets the function called whenever the device's
+// cloud-connection state transitions (online/offline). It fires only on change.
+func (cm *CloudMQTT) SetAvailabilityCallback(cb func(online bool)) {
+	cm.onAvailability = cb
+}
+
+// setAvailability records the cloud-connection state and, on a transition (or the
+// first observation), invokes the availability callback outside the lock.
+func (cm *CloudMQTT) setAvailability(online bool) {
+	cm.mu.Lock()
+	changed := !cm.availKnown || cm.available != online
+	cm.available = online
+	cm.availKnown = true
+	cb := cm.onAvailability
+	cm.mu.Unlock()
+	if changed && cb != nil {
+		cb(online)
+	}
 }
 
 // Connect establishes the MQTT connection to the Roborock cloud broker.
@@ -111,7 +134,9 @@ func (cm *CloudMQTT) onConnect(client pahomqtt.Client) {
 	token := client.Subscribe(topic, 0, cm.handleMessage)
 	if token.Wait() && token.Error() != nil {
 		logger.Error("Failed to subscribe", "error", token.Error())
+		return
 	}
+	cm.setAvailability(true)
 }
 
 func (cm *CloudMQTT) onConnectionLost(_ pahomqtt.Client, err error) {
@@ -119,6 +144,7 @@ func (cm *CloudMQTT) onConnectionLost(_ pahomqtt.Client, err error) {
 	cm.connected = false
 	cm.mu.Unlock()
 	logger.Warn("Roborock cloud MQTT connection lost", "error", err)
+	cm.setAvailability(false)
 }
 
 func (cm *CloudMQTT) handleMessage(_ pahomqtt.Client, mqttMsg pahomqtt.Message) {
@@ -275,6 +301,7 @@ func (cm *CloudMQTT) forceReconnect() {
 		token := cm.client.Connect()
 		if token.Wait() && token.Error() != nil {
 			logger.Error("Failed to reconnect", "device", cm.device.Name, "error", token.Error())
+			cm.setAvailability(false)
 		} else {
 			logger.Info("Reconnected to Roborock cloud MQTT", "device", cm.device.Name)
 		}
@@ -327,6 +354,7 @@ func (cm *CloudMQTT) Disconnect() {
 	if cm.client != nil && cm.client.IsConnected() {
 		cm.client.Disconnect(1000)
 	}
+	cm.setAvailability(false)
 }
 
 // IsConnected returns whether the cloud MQTT connection is active.

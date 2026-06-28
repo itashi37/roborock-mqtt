@@ -6,6 +6,7 @@ import { API_BASE } from '@/lib/api';
 interface SSEHookReturn {
   statuses: Record<string, VacuumStatus>;
   scheduleStates: Record<string, ScheduleState>;
+  availabilities: Record<string, boolean>;
   isConnected: boolean;
   error: string | null;
   reconnect: () => void;
@@ -14,6 +15,7 @@ interface SSEHookReturn {
 export function useSSE(): SSEHookReturn {
   const [statuses, setStatuses] = useState<Record<string, VacuumStatus>>({});
   const [scheduleStates, setScheduleStates] = useState<Record<string, ScheduleState>>({});
+  const [availabilities, setAvailabilities] = useState<Record<string, boolean>>({});
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -47,6 +49,8 @@ export function useSSE(): SSEHookReturn {
           const data = JSON.parse(event.data);
           if (data.type === 'schedule') {
             setScheduleStates(prev => ({ ...prev, [data.device]: data.state }));
+          } else if (data.type === 'availability') {
+            setAvailabilities(prev => ({ ...prev, [data.device]: data.online }));
           } else {
             const { device, ...status } = data as SSEEvent;
             setStatuses(prev => ({ ...prev, [device]: status as VacuumStatus }));
@@ -83,5 +87,5 @@ export function useSSE(): SSEHookReturn {
     connect();
   }, [connect]);
 
-  return { statuses, scheduleStates, isConnected, error, reconnect };
+  return { statuses, scheduleStates, availabilities, isConnected, error, reconnect };
 }

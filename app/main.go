@@ -66,6 +66,22 @@ func publishDeviceSchedule(slug string, state *roborock.ScheduleState) {
 	logger.Debug("Published schedule state", "device", slug, "topic", topic, "dayType", state.ActiveDay)
 }
 
+// publishDeviceAvailability publishes a device's cloud-connection state to the
+// local broker as a retained `<topic>/<slug>/availability` message. Consumers
+// (e.g. the wall-display Wall API) use this to mark a device unavailable rather
+// than trust a stale retained `<topic>/<slug>/status`.
+func publishDeviceAvailability(slug string, online bool) {
+	cfg := config.Get()
+	topic := cfg.MQTT.Topic + "/" + slug + "/availability"
+	payload := "offline"
+	if online {
+		payload = "online"
+	}
+	// Availability is always retained so late subscribers see the current state.
+	mqtt.PublishAbsolute(topic, payload, true)
+	logger.Debug("Published availability", "device", slug, "topic", topic, "state", payload)
+}
+
 func publishDeviceStatus(slug string, status *roborock.PublishedStatus) {
 	cfg := config.Get()
 	topic := cfg.MQTT.Topic + "/" + slug + "/status"
@@ -189,6 +205,18 @@ func startBridge(restClient *roborock.Client) {
 		}
 	})
 	deviceManager.SetMapCallback(publishDeviceMap)
+	deviceManager.SetAvailabilityCallback(func(slug string, online bool) {
+		publishDeviceAvailability(slug, online)
+		if webServer != nil {
+			webServer.BroadcastDeviceAvailability(slug, online)
+		}
+	})
+
+	// Seed a retained `offline` for every device before connecting, so the
+	// availability topic is never absent and consumers start from a safe default.
+	for _, md := range deviceManager.GetDevices() {
+		publishDeviceAvailability(md.Slug, false)
+	}
 
 	// Load cached maps from disk (available before first poll)
 	deviceManager.LoadMapCaches()
