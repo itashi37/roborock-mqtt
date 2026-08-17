@@ -396,14 +396,7 @@ func (ws *WebServer) deviceMapJSON(w http.ResponseWriter, r *http.Request) {
 	if len(apiNames) > 0 || len(cfgNames) > 0 {
 		var vm roborock.VectorMap
 		if err := json.Unmarshal(data, &vm); err == nil {
-			merged := make(map[string]string)
-			for k, v := range apiNames {
-				merged[k] = v
-			}
-			for k, v := range cfgNames {
-				merged[k] = v // config overrides API
-			}
-			vm.RoomNames = merged
+			vm.RoomNames = roborock.MergeRoomNames(apiNames, cfgNames)
 			if enriched, err := json.Marshal(vm); err == nil {
 				data = enriched
 			}

@@ -125,6 +125,7 @@ Published topics (per device):
 | `{topic}/{slug}/status` | Device status (JSON) |
 | `{topic}/{slug}/map` | Map image (PNG) |
 | `{topic}/{slug}/map.json` | Vector map data (JSON) |
+| `{topic}/{slug}/current_room` | Current robot room (`{"id":23,"name":"Cuisine"}` or `null` when unknown) |
 | `{topic}/{slug}/scenes` | Available cleaning programs (JSON) |
 | `{topic}/{slug}/schedule` | Schedule state (JSON) |
 

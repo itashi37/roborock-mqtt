@@ -38,6 +38,20 @@ func publishDeviceMap(slug string, pngData []byte) {
 	logger.Debug("Published map", "device", slug, "topic", topic, "size", len(pngData))
 }
 
+func publishDeviceCurrentRoom(slug string, room *roborock.CurrentRoom) {
+	cfg := config.Get()
+	topic := cfg.MQTT.Topic + "/" + slug + "/current_room"
+
+	data, err := json.Marshal(room)
+	if err != nil {
+		logger.Error("Failed to marshal current room", "error", err)
+		return
+	}
+
+	mqtt.PublishAbsolute(topic, string(data), cfg.MQTT.Retain)
+	logger.Debug("Published current room", "device", slug, "topic", topic, "payload", string(data))
+}
+
 func publishDeviceScenes(slug string, scenes []roborock.Scene) {
 	cfg := config.Get()
 	topic := cfg.MQTT.Topic + "/" + slug + "/scenes"
@@ -204,7 +218,23 @@ func startBridge(restClient *roborock.Client) {
 			}
 		}
 	})
-	deviceManager.SetMapCallback(publishDeviceMap)
+	deviceManager.SetMapCallback(func(slug string, pngData []byte) {
+		publishDeviceMap(slug, pngData)
+
+		dev := deviceManager.GetDevice(slug)
+		if dev == nil {
+			return
+		}
+		apiNames := restClient.GetRoomNameMap()
+		configuredNames := cfg.Roborock.RoomNames[dev.Info.Name]
+		roomNames := roborock.MergeRoomNames(apiNames, configuredNames)
+		room, err := roborock.CurrentRoomFromVectorJSON(dev.GetVectorMapJSON(), roomNames)
+		if err != nil {
+			logger.Warn("Failed to determine current room", "device", slug, "error", err)
+			return
+		}
+		publishDeviceCurrentRoom(slug, room)
+	})
 	deviceManager.SetAvailabilityCallback(func(slug string, online bool) {
 		publishDeviceAvailability(slug, online)
 		if webServer != nil {
@@ -390,4 +420,3 @@ func initPprof() {
 		http.ListenAndServe(":6060", nil)
 	}()
 }
-
